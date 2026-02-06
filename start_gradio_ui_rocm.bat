@@ -35,7 +35,12 @@ set LANGUAGE=en
 REM ==================== Model Configuration ====================
 set CONFIG_PATH=--config_path acestep-v15-turbo
 set LM_MODEL_PATH=--lm_model_path acestep-5Hz-lm-4B
-REM set OFFLOAD_TO_CPU=--offload_to_cpu true
+
+REM CPU offload: required for 4B LM on GPUs with <=20GB VRAM
+REM Models shuttle between CPU/GPU as needed (DiT stays on GPU, LM/VAE/text_encoder move on demand)
+REM Adds ~8-10s overhead per generation but prevents VRAM oversubscription
+REM Disable if using 1.7B/0.6B LM or if your GPU has >=24GB VRAM
+set OFFLOAD_TO_CPU=--offload_to_cpu true
 
 REM LLM initialization: auto (default), true, false
 REM set INIT_LLM=--init_llm auto
