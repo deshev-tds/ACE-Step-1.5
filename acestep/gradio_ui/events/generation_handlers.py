@@ -175,6 +175,11 @@ def load_metadata(file_obj, llm_handler=None):
         use_cot_language = metadata.get('use_cot_language', True)
         audio_cover_strength = metadata.get('audio_cover_strength', 1.0)
         think = metadata.get('thinking', True)  # Fixed: read 'thinking' not 'think'
+        # If LM not initialized, force think to False and warn
+        lm_ok = llm_handler.llm_initialized if llm_handler else False
+        if think and not lm_ok:
+            think = False
+            gr.Warning(t("messages.think_requires_lm"))
         audio_codes = metadata.get('audio_codes', '')
         repainting_start = metadata.get('repainting_start', 0.0)
         repainting_end = metadata.get('repainting_end', -1)
@@ -262,6 +267,11 @@ def load_random_example(task_type: str, llm_handler=None):
             think_value = data.get('think', True)
             if not isinstance(think_value, bool):
                 think_value = True
+            # If LM not initialized, force think to False and warn
+            lm_ok = llm_handler.llm_initialized if llm_handler else False
+            if think_value and not lm_ok:
+                think_value = False
+                gr.Warning(t("messages.think_requires_lm"))
             
             # Extract optional metadata fields
             bpm_value = None
@@ -548,7 +558,7 @@ def init_service_wrapper(dit_handler, llm_handler, checkpoint, config_path, devi
     else:
         status += ", LM not available for this GPU tier"
     
-    # Think checkbox: interactive only when LLM is initialized
+    # Think checkbox: interactive and checked only when LLM is initialized
     think_interactive = lm_actually_initialized
     
     return (
@@ -560,7 +570,7 @@ def init_service_wrapper(dit_handler, llm_handler, checkpoint, config_path, devi
         duration_update,
         batch_update,
         # Think checkbox
-        gr.update(interactive=think_interactive),
+        gr.update(interactive=think_interactive, value=think_interactive),
     )
 
 
@@ -822,7 +832,11 @@ def update_instruction_ui(
     init_llm_checked: bool = False,
     reference_audio=None,
 ) -> tuple:
-    """Update instruction and UI visibility based on task type."""
+    """Update instruction and UI visibility based on task type.
+    
+    Note: init_llm_checked and reference_audio are kept for backward compatibility
+    but no longer used for audio_cover_strength visibility (now handled by mode change).
+    """
     instruction = dit_handler.generate_instruction(
         task_type=task_type_value,
         track_name=track_name_value,
@@ -833,22 +847,6 @@ def update_instruction_ui(
     track_name_visible = task_type_value in ["lego", "extract"]
     # Show complete_track_classes for complete
     complete_visible = task_type_value == "complete"
-    # Show audio_cover_strength for cover, LM initialized, or reference audio present
-    has_reference = _has_reference_audio(reference_audio)
-    audio_cover_strength_visible = (task_type_value == "cover") or init_llm_checked or has_reference
-    # Label priority: cover -> LM codes -> Similarity/Denoise (reference audio)
-    if task_type_value == "cover":
-        audio_cover_strength_label = t("generation.cover_strength_label")
-        audio_cover_strength_info = t("generation.cover_strength_info")
-    elif init_llm_checked:
-        audio_cover_strength_label = t("generation.codes_strength_label")
-        audio_cover_strength_info = t("generation.codes_strength_info")
-    elif has_reference:
-        audio_cover_strength_label = t("generation.similarity_denoise_label")
-        audio_cover_strength_info = t("generation.similarity_denoise_info")
-    else:
-        audio_cover_strength_label = t("generation.cover_strength_label")
-        audio_cover_strength_info = t("generation.cover_strength_info")
     # Show repainting controls for repaint and lego
     repainting_visible = task_type_value in ["repaint", "lego"]
     
@@ -856,7 +854,6 @@ def update_instruction_ui(
         instruction,  # instruction_display_gen
         gr.update(visible=track_name_visible),  # track_name
         gr.update(visible=complete_visible),  # complete_track_classes
-        gr.update(visible=audio_cover_strength_visible, label=audio_cover_strength_label, info=audio_cover_strength_info),  # audio_cover_strength
         gr.update(visible=repainting_visible),  # repainting_group
     )
 
@@ -1057,6 +1054,20 @@ def handle_generation_mode_change(mode: str, llm_handler=None):
     # Complete track classes: only for complete
     show_complete_classes = is_complete
     
+    # Audio cover strength: visible in Custom, Remix, Extract, Lego, Complete; hidden in Simple, Repaint
+    show_strength = not is_simple and not is_repaint
+    if is_cover:
+        strength_label = t("generation.remix_strength_label")
+        strength_info = t("generation.remix_strength_info")
+    elif is_custom:
+        strength_label = t("generation.codes_strength_label")
+        strength_info = t("generation.codes_strength_info")
+    else:
+        # Extract, Lego, Complete — use generic cover strength label
+        strength_label = t("generation.cover_strength_label")
+        strength_info = t("generation.cover_strength_info")
+    strength_update = gr.update(visible=show_strength, label=strength_label, info=strength_info)
+
     # Think checkbox: requires LLM initialization AND not in Remix/Repaint mode
     lm_initialized = llm_handler.llm_initialized if llm_handler else False
     think_interactive = lm_initialized and not (is_cover or is_repaint)
@@ -1064,7 +1075,7 @@ def handle_generation_mode_change(mode: str, llm_handler=None):
     if is_cover or is_repaint:
         think_update = gr.update(interactive=False, value=False)
     elif not lm_initialized:
-        think_update = gr.update(interactive=False)
+        think_update = gr.update(interactive=False, value=False)
     else:
         think_update = gr.update(interactive=True)
     
@@ -1099,7 +1110,9 @@ def handle_generation_mode_change(mode: str, llm_handler=None):
         gr.update(info=mode_info_text),           # generation_mode (info text)
         gr.update(visible=show_results),          # results_wrapper
         think_update,                             # think_checkbox
-        gr.update(visible=not_simple),            # load_file_col
+        gr.update(visible=not_simple),            # load_file_col (Column)
+        gr.update(visible=not_simple),            # load_file (UploadButton)
+        strength_update,                          # audio_cover_strength
     )
 
 

@@ -138,24 +138,6 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
         outputs=[generation_section["lm_negative_prompt"]]
     )
     
-    generation_section["init_llm_checkbox"].change(
-        fn=gen_h.update_audio_cover_strength_visibility,
-        inputs=[generation_section["task_type"], generation_section["init_llm_checkbox"], generation_section["reference_audio"]],
-        outputs=[generation_section["audio_cover_strength"]]
-    )
-    
-    generation_section["task_type"].change(
-        fn=gen_h.update_audio_cover_strength_visibility,
-        inputs=[generation_section["task_type"], generation_section["init_llm_checkbox"], generation_section["reference_audio"]],
-        outputs=[generation_section["audio_cover_strength"]]
-    )
-    
-    generation_section["reference_audio"].change(
-        fn=gen_h.update_audio_cover_strength_visibility,
-        inputs=[generation_section["task_type"], generation_section["init_llm_checkbox"], generation_section["reference_audio"]],
-        outputs=[generation_section["audio_cover_strength"]]
-    )
-    
     generation_section["batch_size_input"].change(
         fn=gen_h.update_audio_components_visibility,
         inputs=[generation_section["batch_size_input"]],
@@ -215,7 +197,6 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
                 generation_section["instruction_display_gen"],
                 generation_section["track_name"],
                 generation_section["complete_track_classes"],
-                generation_section["audio_cover_strength"],
                 generation_section["repainting_group"],
             ]
         )
@@ -368,6 +349,8 @@ def setup_event_handlers(demo, dit_handler, llm_handler, dataset_handler, datase
             generation_section["results_wrapper"],
             generation_section["think_checkbox"],
             generation_section["load_file_col"],
+            generation_section["load_file"],
+            generation_section["audio_cover_strength"],
         ]
     )
     

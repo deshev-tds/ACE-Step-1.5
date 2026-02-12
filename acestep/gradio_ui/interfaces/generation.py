@@ -355,12 +355,6 @@ def create_advanced_settings_section(dit_handler, llm_handler, init_params=None,
                     info=t("generation.shift_info"),
                     visible=_ui_config["shift_visible"],
                 )
-                audio_cover_strength = gr.Slider(
-                    minimum=0.0, maximum=1.0, value=1.0, step=0.01,
-                    label=t("generation.codes_strength_label"),
-                    info=t("generation.codes_strength_info"),
-                    scale=1,
-                )
             with gr.Row():
                 custom_timesteps = gr.Textbox(
                     label=t("generation.custom_timesteps_label"),
@@ -458,7 +452,6 @@ def create_advanced_settings_section(dit_handler, llm_handler, init_params=None,
         "infer_method": infer_method,
         "use_adg": use_adg,
         "shift": shift,
-        "audio_cover_strength": audio_cover_strength,
         "custom_timesteps": custom_timesteps,
         "cfg_interval_start": cfg_interval_start,
         "cfg_interval_end": cfg_interval_end,
@@ -536,7 +529,7 @@ def create_generation_tab_section(dit_handler, llm_handler, init_params=None, la
                 info=t("generation.mode_info_custom"),
                 scale=10,
             )
-            with gr.Column(scale=1, min_width=80, elem_classes="icon-btn-wrap", visible=True) as load_file_col:
+            with gr.Column(scale=1, min_width=80, elem_classes="icon-btn-wrap") as load_file_col:
                 load_file = gr.UploadButton(
                     t("generation.load_btn"),
                     file_types=[".json"],
@@ -639,6 +632,15 @@ def create_generation_tab_section(dit_handler, llm_handler, init_params=None, la
                     scale=1,
                 )
 
+        # --- Audio Cover Strength / LM Codes Strength / Remix Strength slider ---
+        # Visible in Custom, Remix, Extract, Lego, Complete; hidden in Simple and Repaint
+        audio_cover_strength = gr.Slider(
+            minimum=0.0, maximum=1.0, value=1.0, step=0.01,
+            label=t("generation.codes_strength_label"),
+            info=t("generation.codes_strength_info"),
+            visible=True,
+        )
+
         # --- Custom Mode: Reference Audio | (Caption + Enhance) | (Lyrics + Instrumental + Enhance) | 🎲 ---
         with gr.Group(visible=True) as custom_mode_group:
             with gr.Row(equal_height=True):
@@ -734,7 +736,7 @@ def create_generation_tab_section(dit_handler, llm_handler, init_params=None, la
         generate_btn_interactive = init_params.get('enable_generate', False) if service_pre_initialized else False
         with gr.Row(equal_height=True, visible=True) as generate_btn_row:
             with gr.Column(scale=1, variant="compact"):
-                think_checkbox = gr.Checkbox(label=t("generation.think_label"), value=True, scale=1, interactive=lm_initialized)
+                think_checkbox = gr.Checkbox(label=t("generation.think_label"), value=lm_initialized, scale=1, interactive=lm_initialized)
                 auto_score = gr.Checkbox(label=t("generation.auto_score_label"), value=False, scale=1, interactive=not service_mode)
             with gr.Column(scale=18):
                 generate_btn = gr.Button(t("generation.generate_btn"), variant="primary", size="lg", interactive=generate_btn_interactive)
@@ -760,6 +762,7 @@ def create_generation_tab_section(dit_handler, llm_handler, init_params=None, la
         "text2music_audio_code_string": text2music_audio_code_string,
         "transcribe_btn": transcribe_btn,
         "text2music_audio_codes_group": text2music_audio_codes_group,
+        "audio_cover_strength": audio_cover_strength,
         "track_name": track_name,
         "complete_track_classes": complete_track_classes,
         "repainting_group": repainting_group,
