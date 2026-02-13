@@ -44,6 +44,38 @@ class AudioCodesMixin:
             logger.debug(f"[_parse_audio_code_string] Failed to parse audio code string: {e}")
             return []
 
+    @staticmethod
+    def _is_linear_dtype_mismatch(error: RuntimeError) -> bool:
+        """Return ``True`` when the runtime error indicates matmul dtype mismatch."""
+        return "mat1 and mat2 must have the same dtype" in str(error)
+
+    def _decode_quantizer_indices(self, quantizer, indices: torch.Tensor) -> torch.Tensor:
+        """Decode quantizer indices with a mixed-precision fallback.
+
+        Some ROCm stacks surface ``Float`` input + ``Half`` ``project_out`` weight
+        mismatches inside ``ResidualFSQ.get_output_from_indices``. In that case we
+        upcast ``project_out`` to ``float32`` and retry once.
+        """
+        try:
+            return quantizer.get_output_from_indices(indices)
+        except RuntimeError as error:
+            if not self._is_linear_dtype_mismatch(error):
+                raise
+
+            project_out = getattr(quantizer, "project_out", None)
+            weight = getattr(project_out, "weight", None)
+            if project_out is None or weight is None:
+                raise
+
+            if weight.dtype != torch.float32:
+                logger.warning(
+                    "[_decode_audio_codes_to_latents] Detected quantizer dtype mismatch; "
+                    "switching tokenizer.quantizer.project_out to float32 for decode compatibility."
+                )
+                project_out.to(dtype=torch.float32)
+
+            return quantizer.get_output_from_indices(indices)
+
     def _decode_audio_codes_to_latents(self, code_str: str) -> Optional[torch.Tensor]:
         """Convert serialized audio-code string into 25Hz latents."""
         if self.model is None or not hasattr(self.model, "tokenizer") or not hasattr(self.model, "detokenizer"):
@@ -59,7 +91,7 @@ class AudioCodesMixin:
             indices = torch.tensor(code_ids, device=self.device, dtype=torch.long)
             indices = indices.unsqueeze(0).unsqueeze(-1)
 
-            quantized = quantizer.get_output_from_indices(indices)
+            quantized = self._decode_quantizer_indices(quantizer, indices)
             if quantized.dtype != self.dtype:
                 quantized = quantized.to(self.dtype)
             lm_hints_25hz = detokenizer(quantized)
