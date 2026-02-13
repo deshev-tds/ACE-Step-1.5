@@ -1,6 +1,7 @@
 """Unit tests for ROCm compatibility helpers used by service init."""
 
 import unittest
+import types
 from unittest.mock import patch
 
 import torch
@@ -8,6 +9,7 @@ import torch
 from acestep.core.generation.handler.rocm_compat import (
     build_attention_candidates,
     choose_service_dtype,
+    force_rocm_quantizer_project_out_fp32,
     is_rocm_cuda_device,
     should_rocm_direct_model_load,
 )
@@ -122,6 +124,42 @@ class TestRocmCompat(unittest.TestCase):
                 offload_dit_to_cpu=False,
             )
         )
+
+    def test_force_rocm_quantizer_project_out_fp32_converts_half_weights(self):
+        """ROCm helper should upcast quantizer project_out to float32."""
+        project_out = torch.nn.Linear(6, 2048, bias=True).to(dtype=torch.float16)
+        model = types.SimpleNamespace(
+            tokenizer=types.SimpleNamespace(
+                quantizer=types.SimpleNamespace(project_out=project_out)
+            )
+        )
+
+        changed = force_rocm_quantizer_project_out_fp32(model)
+
+        self.assertTrue(changed)
+        self.assertEqual(project_out.weight.dtype, torch.float32)
+
+    def test_force_rocm_quantizer_project_out_fp32_noop_without_quantizer(self):
+        """Helper should no-op when tokenizer quantizer path is absent."""
+        model = types.SimpleNamespace(tokenizer=None)
+
+        changed = force_rocm_quantizer_project_out_fp32(model)
+
+        self.assertFalse(changed)
+
+    def test_force_rocm_quantizer_project_out_fp32_noop_when_already_fp32(self):
+        """Helper should report no change when layer is already float32."""
+        project_out = torch.nn.Linear(6, 2048, bias=True).to(dtype=torch.float32)
+        model = types.SimpleNamespace(
+            tokenizer=types.SimpleNamespace(
+                quantizer=types.SimpleNamespace(project_out=project_out)
+            )
+        )
+
+        changed = force_rocm_quantizer_project_out_fp32(model)
+
+        self.assertFalse(changed)
+        self.assertEqual(project_out.weight.dtype, torch.float32)
 
 
 if __name__ == "__main__":

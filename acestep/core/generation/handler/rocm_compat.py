@@ -100,3 +100,32 @@ def should_rocm_direct_model_load(
     if not offload_to_cpu:
         return True
     return not offload_dit_to_cpu
+
+
+def force_rocm_quantizer_project_out_fp32(model: torch.nn.Module) -> bool:
+    """Force tokenizer quantizer ``project_out`` to ``float32`` when present.
+
+    On some ROCm stacks, ``ResidualFSQ.forward`` can emit ``float32`` activations
+    while ``project_out`` stays in ``float16``, causing ``mat1/mat2`` dtype
+    mismatch at runtime. This helper upgrades that linear layer to ``float32``.
+
+    Args:
+        model: Loaded DiT model instance.
+
+    Returns:
+        ``True`` if dtype was changed, ``False`` when no change was needed or
+        the expected tokenizer path does not exist.
+    """
+    root_model = getattr(model, "_orig_mod", model)
+    tokenizer = getattr(root_model, "tokenizer", None)
+    quantizer = getattr(tokenizer, "quantizer", None)
+    project_out = getattr(quantizer, "project_out", None)
+    weight = getattr(project_out, "weight", None)
+
+    if project_out is None or weight is None:
+        return False
+    if weight.dtype == torch.float32:
+        return False
+
+    project_out.to(dtype=torch.float32)
+    return True

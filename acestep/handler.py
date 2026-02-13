@@ -56,6 +56,7 @@ from acestep.core.generation.handler import (
 from acestep.core.generation.handler.rocm_compat import (
     build_attention_candidates,
     choose_service_dtype,
+    force_rocm_quantizer_project_out_fp32,
     is_rocm_cuda_device,
     should_rocm_direct_model_load,
 )
@@ -730,6 +731,12 @@ class AceStepHandler(
                     self._recursive_to_device(self.model, device, self.dtype)
                 else:
                     self._recursive_to_device(self.model, "cpu", self.dtype)
+
+                if is_rocm_cuda and force_rocm_quantizer_project_out_fp32(self.model):
+                    logger.info(
+                        "[initialize_service] ROCm quantizer compatibility enabled: "
+                        "tokenizer.quantizer.project_out set to float32."
+                    )
                 self.model.eval()
                 
                 if compile_model:
