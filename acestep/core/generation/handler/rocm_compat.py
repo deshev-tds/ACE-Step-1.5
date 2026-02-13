@@ -129,3 +129,48 @@ def force_rocm_quantizer_project_out_fp32(model: torch.nn.Module) -> bool:
 
     project_out.to(dtype=torch.float32)
     return True
+
+
+def install_rocm_detokenizer_input_cast_hook(model: torch.nn.Module) -> bool:
+    """Install a hook that casts detokenizer input to its floating parameter dtype.
+
+    After forcing tokenizer ``project_out`` to ``float32``, some model paths feed
+    ``float32`` tensors into a ``float16`` detokenizer and fail in Linear layers.
+    This hook keeps detokenizer inputs aligned with its own parameter dtype.
+
+    Args:
+        model: Loaded DiT model instance.
+
+    Returns:
+        ``True`` if a new hook was installed, ``False`` otherwise.
+    """
+    root_model = getattr(model, "_orig_mod", model)
+    detokenizer = getattr(root_model, "detokenizer", None)
+    if detokenizer is None or not isinstance(detokenizer, torch.nn.Module):
+        return False
+    if hasattr(detokenizer, "_acestep_rocm_input_cast_hook"):
+        return False
+
+    target_dtype = None
+    for parameter in detokenizer.parameters():
+        if parameter.is_floating_point():
+            target_dtype = parameter.dtype
+            break
+    if target_dtype is None:
+        return False
+
+    def _cast_input(_module, inputs):
+        if not inputs:
+            return None
+        first = inputs[0]
+        if (
+            torch.is_tensor(first)
+            and first.is_floating_point()
+            and first.dtype != target_dtype
+        ):
+            return (first.to(dtype=target_dtype), *inputs[1:])
+        return None
+
+    hook_handle = detokenizer.register_forward_pre_hook(_cast_input)
+    detokenizer._acestep_rocm_input_cast_hook = hook_handle
+    return True

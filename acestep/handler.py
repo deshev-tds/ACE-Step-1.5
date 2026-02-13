@@ -58,6 +58,7 @@ from acestep.core.generation.handler.rocm_compat import (
     choose_service_dtype,
     force_rocm_quantizer_project_out_fp32,
     is_rocm_cuda_device,
+    install_rocm_detokenizer_input_cast_hook,
     should_rocm_direct_model_load,
 )
 from acestep.core.generation.handler.latent_padding import (
@@ -736,6 +737,11 @@ class AceStepHandler(
                     logger.info(
                         "[initialize_service] ROCm quantizer compatibility enabled: "
                         "tokenizer.quantizer.project_out set to float32."
+                    )
+                if is_rocm_cuda and install_rocm_detokenizer_input_cast_hook(self.model):
+                    logger.info(
+                        "[initialize_service] ROCm detokenizer compatibility enabled: "
+                        "detokenizer inputs will be cast to detokenizer parameter dtype."
                     )
                 self.model.eval()
                 

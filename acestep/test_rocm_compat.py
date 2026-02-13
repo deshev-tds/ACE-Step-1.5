@@ -11,6 +11,7 @@ from acestep.core.generation.handler.rocm_compat import (
     choose_service_dtype,
     force_rocm_quantizer_project_out_fp32,
     is_rocm_cuda_device,
+    install_rocm_detokenizer_input_cast_hook,
     should_rocm_direct_model_load,
 )
 
@@ -160,6 +161,55 @@ class TestRocmCompat(unittest.TestCase):
 
         self.assertFalse(changed)
         self.assertEqual(project_out.weight.dtype, torch.float32)
+
+    def test_install_rocm_detokenizer_input_cast_hook_casts_fp32_to_fp16(self):
+        """Detokenizer hook should cast floating input to detokenizer parameter dtype."""
+
+        class _DetokenizerStub(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = torch.nn.Parameter(torch.zeros(1, dtype=torch.float16))
+                self.last_input_dtype = None
+
+            def forward(self, x):
+                self.last_input_dtype = x.dtype
+                return x
+
+        detokenizer = _DetokenizerStub()
+        model = types.SimpleNamespace(detokenizer=detokenizer)
+
+        installed = install_rocm_detokenizer_input_cast_hook(model)
+        output = detokenizer(torch.randn(2, 3, dtype=torch.float32))
+
+        self.assertTrue(installed)
+        self.assertEqual(detokenizer.last_input_dtype, torch.float16)
+        self.assertEqual(output.dtype, torch.float16)
+
+    def test_install_rocm_detokenizer_input_cast_hook_noop_when_missing(self):
+        """Hook install should no-op when detokenizer module is absent."""
+        model = types.SimpleNamespace(detokenizer=None)
+        installed = install_rocm_detokenizer_input_cast_hook(model)
+        self.assertFalse(installed)
+
+    def test_install_rocm_detokenizer_input_cast_hook_noop_when_already_installed(self):
+        """Hook install should not duplicate hooks on repeated calls."""
+
+        class _DetokenizerStub(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = torch.nn.Parameter(torch.zeros(1, dtype=torch.float16))
+
+            def forward(self, x):
+                return x
+
+        detokenizer = _DetokenizerStub()
+        model = types.SimpleNamespace(detokenizer=detokenizer)
+
+        first = install_rocm_detokenizer_input_cast_hook(model)
+        second = install_rocm_detokenizer_input_cast_hook(model)
+
+        self.assertTrue(first)
+        self.assertFalse(second)
 
 
 if __name__ == "__main__":
