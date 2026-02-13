@@ -59,6 +59,10 @@ from acestep.core.generation.handler.rocm_compat import (
     is_rocm_cuda_device,
     should_rocm_direct_model_load,
 )
+from acestep.core.generation.handler.latent_padding import (
+    build_silence_latent,
+    normalize_latent_length,
+)
 from acestep.dit_alignment_score import MusicStampsAligner, MusicLyricScorer
 from acestep.gpu_config import get_gpu_memory_gb, get_global_gpu_config, get_effective_free_vram_gb
 
@@ -997,7 +1001,12 @@ class AceStepHandler(
                     current_wav = target_wavs_list[i].to(self.device).unsqueeze(0)
                     if self.is_silence(current_wav):
                         expected_latent_length = current_wav.shape[-1] // 1920
-                        target_latent = self.silence_latent[0, :expected_latent_length, :]
+                        target_latent = build_silence_latent(
+                            self.silence_latent,
+                            expected_latent_length,
+                            device=self.device,
+                            dtype=self.silence_latent.dtype,
+                        )
                     else:
                         # Check if this wav is identical to a previously encoded
                         # one so we can skip the expensive VAE encode.
@@ -1034,12 +1043,15 @@ class AceStepHandler(
             
             padded_latents = []
             for latent in target_latents_list:
-                latent_length = latent.shape[0]
-                
-                if latent.shape[0] < max_latent_length:
-                    pad_length = max_latent_length - latent.shape[0]
-                    latent = torch.cat([latent, self.silence_latent[0, :pad_length, :]], dim=0)
+                if latent.shape[0] != max_latent_length:
+                    latent = normalize_latent_length(latent, max_latent_length, self.silence_latent)
                 padded_latents.append(latent)
+
+            if any(latent.shape[0] != max_latent_length for latent in padded_latents):
+                raise RuntimeError(
+                    f"Latent length normalization failed: expected {max_latent_length}, "
+                    f"got {[latent.shape[0] for latent in padded_latents]}"
+                )
             
             target_latents = torch.stack(padded_latents)
             latent_masks = torch.stack([
@@ -1132,7 +1144,12 @@ class AceStepHandler(
         # For text2music task: src_latents = silence_latent (if no target_wavs or silence)
         # For repaint task: additionally replace inpainting region with silence_latent
         src_latents_list = []
-        silence_latent_tiled = self.silence_latent[0, :max_latent_length, :]
+        silence_latent_tiled = build_silence_latent(
+            self.silence_latent,
+            max_latent_length,
+            device=target_latents.device,
+            dtype=target_latents.dtype,
+        )
         for i in range(batch_size):
             # Check if target_wavs is provided and not silent (for extract/complete/lego/cover/repaint tasks)
             has_code_hint = audio_code_hints[i] is not None
@@ -1170,22 +1187,8 @@ class AceStepHandler(
                 logger.info(f"[generate_music] Decoding audio codes for LM hints for item {i}...")
                 hints = self._decode_audio_codes_to_latents(audio_code_hints[i])
                 if hints is not None:
-                    # Pad or crop to match max_latent_length
-                    if hints.shape[1] < max_latent_length:
-                        pad_length = max_latent_length - hints.shape[1]
-                        pad = self.silence_latent
-                        # Match dims: hints is usually [1, T, D], silence_latent is [1, T, D]
-                        if pad.dim() == 2:
-                            pad = pad.unsqueeze(0)
-                        if hints.dim() == 2:
-                            hints = hints.unsqueeze(0)
-                        pad_chunk = pad[:, :pad_length, :]
-                        if pad_chunk.device != hints.device or pad_chunk.dtype != hints.dtype:
-                            pad_chunk = pad_chunk.to(device=hints.device, dtype=hints.dtype)
-                        hints = torch.cat([hints, pad_chunk], dim=1)
-                    elif hints.shape[1] > max_latent_length:
-                        hints = hints[:, :max_latent_length, :]
-                    precomputed_lm_hints_25Hz_list.append(hints[0])  # Remove batch dimension
+                    hints = normalize_latent_length(hints, max_latent_length, self.silence_latent)
+                    precomputed_lm_hints_25Hz_list.append(hints)
                 else:
                     precomputed_lm_hints_25Hz_list.append(None)
             else:
