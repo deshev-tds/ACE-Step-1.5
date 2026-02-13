@@ -251,6 +251,48 @@ class InitServiceMixin:
         moved = param.to(target_device)
         return torch.nn.Parameter(moved, requires_grad=param.requires_grad)
 
+    @staticmethod
+    def _should_avoid_module_to(target_device: torch.device) -> bool:
+        """Return ``True`` when bulk ``module.to(...)`` should be avoided.
+
+        Args:
+            target_device: Resolved target device.
+
+        Returns:
+            ``True`` for ROCm CUDA targets where ``module.to()`` can crash in
+            ``Module._apply`` on some runtime combinations.
+        """
+        return target_device.type == "cuda" and getattr(torch.version, "hip", None) is not None
+
+    def _move_model_parameters_individually(self, model, target_device, dtype=None) -> None:
+        """Move model parameters and buffers without calling ``module.to()``.
+
+        Args:
+            model: Module to move.
+            target_device: Target device object.
+            dtype: Optional floating dtype to apply after device move.
+        """
+        for module in model.modules():
+            for param_name, param in module._parameters.items():
+                if param is None:
+                    continue
+                if self._is_on_target_device(param, target_device):
+                    continue
+                if self._is_quantized_tensor(param):
+                    module._parameters[param_name] = self._move_quantized_param(param, target_device)
+                else:
+                    module._parameters[param_name] = torch.nn.Parameter(
+                        param.data.to(target_device), requires_grad=param.requires_grad
+                    )
+                    if dtype is not None:
+                        module._parameters[param_name] = torch.nn.Parameter(
+                            module._parameters[param_name].data.to(dtype),
+                            requires_grad=param.requires_grad,
+                        )
+            for buf_name, buf in module._buffers.items():
+                if buf is not None and not self._is_on_target_device(buf, target_device):
+                    module._buffers[buf_name] = buf.to(target_device)
+
     def _recursive_to_device(self, model, device, dtype=None):
         """
         Recursively move all parameters and buffers of a model to the specified device.
@@ -262,47 +304,36 @@ class InitServiceMixin:
         In that case, falls back to moving quantized parameters individually via _apply_fn_to_data.
         """
         target_device = torch.device(device) if isinstance(device, str) else device
+        avoid_module_to = self._should_avoid_module_to(target_device)
 
-        # Method 1: Standard .to() call — works on newer torch where _apply uses swap_tensors
-        try:
-            model.to(target_device)
-            if dtype is not None:
-                model.to(dtype)
-        except NotImplementedError:
-            # Older torch: Module._apply calls _has_compatible_shallow_copy_type which is
-            # not implemented for AffineQuantizedTensor. Move parameters manually.
+        # Method 1: Standard .to() call when stable, otherwise safe manual move.
+        if avoid_module_to:
             logger.info(
-                "[_recursive_to_device] model.to() raised NotImplementedError "
-                "(AffineQuantizedTensor on older torch). Moving parameters individually."
+                "[_recursive_to_device] ROCm runtime detected; skipping model.to() "
+                "and moving parameters individually."
             )
-            for module in model.modules():
-                # Move non-quantized parameters and buffers directly
-                for param_name, param in module._parameters.items():
-                    if param is None:
-                        continue
-                    if self._is_on_target_device(param, target_device):
-                        continue
-                    if self._is_quantized_tensor(param):
-                        module._parameters[param_name] = self._move_quantized_param(param, target_device)
-                    else:
-                        module._parameters[param_name] = torch.nn.Parameter(
-                            param.data.to(target_device), requires_grad=param.requires_grad
-                        )
-                        if dtype is not None:
-                            module._parameters[param_name] = torch.nn.Parameter(
-                                module._parameters[param_name].data.to(dtype),
-                                requires_grad=param.requires_grad,
-                            )
-                for buf_name, buf in module._buffers.items():
-                    if buf is not None and not self._is_on_target_device(buf, target_device):
-                        module._buffers[buf_name] = buf.to(target_device)
+            self._move_model_parameters_individually(model, target_device, dtype)
+        else:
+            try:
+                model.to(target_device)
+                if dtype is not None:
+                    model.to(dtype)
+            except NotImplementedError:
+                # Older torch: Module._apply calls _has_compatible_shallow_copy_type which is
+                # not implemented for AffineQuantizedTensor. Move parameters manually.
+                logger.info(
+                    "[_recursive_to_device] model.to() raised NotImplementedError "
+                    "(AffineQuantizedTensor on older torch). Moving parameters individually."
+                )
+                self._move_model_parameters_individually(model, target_device, dtype)
 
         # Method 2: Use our thorough recursive moving for any missed modules
-        # (skip if model.to() failed — we already moved everything above)
-        try:
-            self._move_module_recursive(model, target_device, dtype)
-        except NotImplementedError:
-            pass  # Already handled above
+        # (skip on ROCm because _move_module_recursive also calls module.to()).
+        if not avoid_module_to:
+            try:
+                self._move_module_recursive(model, target_device, dtype)
+            except NotImplementedError:
+                pass  # Already handled above
 
         # Method 3: Force move via state_dict if there are still parameters on wrong device
         wrong_device_params = []

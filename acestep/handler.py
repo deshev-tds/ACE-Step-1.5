@@ -53,6 +53,11 @@ from acestep.core.generation.handler import (
     PromptMixin,
     TaskUtilsMixin,
 )
+from acestep.core.generation.handler.rocm_compat import (
+    build_attention_candidates,
+    choose_service_dtype,
+    is_rocm_cuda_device,
+)
 from acestep.dit_alignment_score import MusicStampsAligner, MusicLyricScorer
 from acestep.gpu_config import get_gpu_memory_gb, get_global_gpu_config, get_effective_free_vram_gb
 
@@ -575,6 +580,8 @@ class AceStepHandler(
             self.offload_to_cpu = offload_to_cpu
             self.offload_dit_to_cpu = offload_dit_to_cpu
             
+            is_rocm_cuda = is_rocm_cuda_device(device)
+
             # MPS safety: torch.compile and torchao quantization are not supported on MPS
             if device == "mps":
                 if compile_model:
@@ -583,16 +590,16 @@ class AceStepHandler(
                 if quantization is not None:
                     logger.warning("[initialize_service] Quantization (torchao) is not supported on MPS — disabling.")
                     quantization = None
+
+            # ROCm safety: torchao quantization is currently unstable/unsupported
+            # across common ROCm stacks used with ACE-Step.
+            if is_rocm_cuda and quantization is not None:
+                logger.warning("[initialize_service] Quantization (torchao) is not supported on ROCm — disabling.")
+                quantization = None
             
             self.compiled = compile_model
-            # Set dtype based on device: bf16 for CUDA/XPU, fp32 for MPS/CPU
-            # MPS does not support bfloat16 natively, and converting bfloat16-trained
-            # weights to float16 causes NaN/Inf due to the narrower exponent range.
-            # Use float32 on MPS for numerical stability.
-            if device in ["cuda", "xpu"]:
-                self.dtype = torch.bfloat16
-            else:
-                self.dtype = torch.float32
+            # Set dtype based on runtime backend.
+            self.dtype = choose_service_dtype(device)
             self.quantization = quantization
             if self.quantization is not None:
                 assert compile_model, "Quantization requires compile_model to be True"
@@ -653,22 +660,20 @@ class AceStepHandler(
                     torch.cuda.empty_cache()
                     torch.cuda.synchronize()
 
-                # Determine attention implementation, then fall back safely.
-                if use_flash_attention and self.is_flash_attention_available(device):
-                    attn_implementation = "flash_attention_2"
-                else:
-                    if use_flash_attention:
-                        logger.warning(
-                            f"[initialize_service] Flash attention requested but unavailable for device={device}. "
-                            "Falling back to SDPA."
-                        )
-                    attn_implementation = "sdpa"
+                # Determine attention implementation candidates with ROCm-safe ordering.
+                flash_attention_available = use_flash_attention and self.is_flash_attention_available(device)
+                if use_flash_attention and not flash_attention_available:
+                    fallback_target = "eager" if is_rocm_cuda else "SDPA"
+                    logger.warning(
+                        f"[initialize_service] Flash attention requested but unavailable for device={device}. "
+                        f"Falling back to {fallback_target}."
+                    )
 
-                attn_candidates = [attn_implementation]
-                if "sdpa" not in attn_candidates:
-                    attn_candidates.append("sdpa")
-                if "eager" not in attn_candidates:
-                    attn_candidates.append("eager")
+                attn_candidates = build_attention_candidates(
+                    use_flash_attention=use_flash_attention,
+                    flash_attention_available=flash_attention_available,
+                    is_rocm_cuda=is_rocm_cuda,
+                )
 
                 last_attn_error = None
                 self.model = None
@@ -696,14 +701,14 @@ class AceStepHandler(
                 self.config = self.model.config
                 # Move model to device and set dtype
                 if not self.offload_to_cpu:
-                    self.model = self.model.to(device).to(self.dtype)
+                    self._recursive_to_device(self.model, device, self.dtype)
                 else:
                     # If offload_to_cpu is True, check if we should keep DiT on GPU
                     if not self.offload_dit_to_cpu:
                         logger.info(f"[initialize_service] Keeping main model on {device} (persistent)")
-                        self.model = self.model.to(device).to(self.dtype)
+                        self._recursive_to_device(self.model, device, self.dtype)
                     else:
-                        self.model = self.model.to("cpu").to(self.dtype)
+                        self._recursive_to_device(self.model, "cpu", self.dtype)
                 self.model.eval()
                 
                 if compile_model:
@@ -770,11 +775,11 @@ class AceStepHandler(
                 if not self.offload_to_cpu:
                     # Keep VAE in GPU precision when resident on accelerator.
                     vae_dtype = self._get_vae_dtype(device)
-                    self.vae = self.vae.to(device).to(vae_dtype)
+                    self._recursive_to_device(self.vae, device, vae_dtype)
                 else:
                     # Use CPU-appropriate dtype when VAE is offloaded.
                     vae_dtype = self._get_vae_dtype("cpu")
-                    self.vae = self.vae.to("cpu").to(vae_dtype)
+                    self._recursive_to_device(self.vae, "cpu", vae_dtype)
                 self.vae.eval()
             else:
                 raise FileNotFoundError(f"VAE checkpoint not found at {vae_checkpoint_path}")
@@ -796,9 +801,9 @@ class AceStepHandler(
                 self.text_tokenizer = AutoTokenizer.from_pretrained(text_encoder_path)
                 self.text_encoder = AutoModel.from_pretrained(text_encoder_path)
                 if not self.offload_to_cpu:
-                    self.text_encoder = self.text_encoder.to(device).to(self.dtype)
+                    self._recursive_to_device(self.text_encoder, device, self.dtype)
                 else:
-                    self.text_encoder = self.text_encoder.to("cpu").to(self.dtype)
+                    self._recursive_to_device(self.text_encoder, "cpu", self.dtype)
                 self.text_encoder.eval()
             else:
                 raise FileNotFoundError(f"Text encoder not found at {text_encoder_path}")
