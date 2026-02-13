@@ -65,6 +65,10 @@ from acestep.core.generation.handler.latent_padding import (
     build_silence_latent,
     normalize_latent_length,
 )
+from acestep.core.generation.handler.latent_safety import (
+    all_non_finite_sample_mask,
+    sanitize_non_finite_latents,
+)
 from acestep.dit_alignment_score import MusicStampsAligner, MusicLyricScorer
 from acestep.gpu_config import get_gpu_memory_gb, get_global_gpu_config, get_effective_free_vram_gb
 
@@ -2563,13 +2567,42 @@ class AceStepHandler(
                 logger.debug(f"[generate_music] pred_latents: {pred_latents.shape}, dtype={pred_latents.dtype}")
             logger.debug(f"[generate_music] time_costs: {time_costs}")
 
-            if torch.isnan(pred_latents).any() or torch.isinf(pred_latents).any():
-                raise RuntimeError(
-                    "Generation produced NaN or Inf latents. "
-                    "This usually indicates a checkpoint/config mismatch "
-                    "or unsupported quantization/backend combination. "
-                    "Try running with --backend pt or verify your model checkpoints match this release."
-                )
+            invalid_sample_mask = all_non_finite_sample_mask(pred_latents)
+            pred_latents, replaced_count = sanitize_non_finite_latents(pred_latents)
+            if replaced_count > 0:
+                if is_rocm_cuda_device(self.device):
+                    total_values = pred_latents.numel()
+                    logger.warning(
+                        "[generate_music] Detected {}/{} non-finite latent values on ROCm; "
+                        "replaced with zeros for decode stability.",
+                        replaced_count,
+                        total_values,
+                    )
+                    if invalid_sample_mask.any():
+                        fallback_latent = build_silence_latent(
+                            self.silence_latent,
+                            pred_latents.shape[1],
+                            device=pred_latents.device,
+                            dtype=pred_latents.dtype,
+                        )
+                        fallback_latent = fallback_latent.unsqueeze(0)
+                        invalid_count = int(invalid_sample_mask.sum().item())
+                        pred_latents[invalid_sample_mask] = fallback_latent.expand(
+                            invalid_count,
+                            -1,
+                            -1,
+                        )
+                        logger.warning(
+                            "[generate_music] Replaced {} fully-invalid latent sample(s) with silence fallback.",
+                            invalid_count,
+                        )
+                else:
+                    raise RuntimeError(
+                        "Generation produced NaN or Inf latents. "
+                        "This usually indicates a checkpoint/config mismatch "
+                        "or unsupported quantization/backend combination. "
+                        "Try running with --backend pt or verify your model checkpoints match this release."
+                    )
             if pred_latents.numel() > 0 and pred_latents.abs().sum() == 0:
                 raise RuntimeError(
                     "Generation produced zero latents. "
