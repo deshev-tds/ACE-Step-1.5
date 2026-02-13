@@ -57,6 +57,7 @@ from acestep.core.generation.handler.rocm_compat import (
     build_attention_candidates,
     choose_service_dtype,
     is_rocm_cuda_device,
+    should_rocm_direct_model_load,
 )
 from acestep.dit_alignment_score import MusicStampsAligner, MusicLyricScorer
 from acestep.gpu_config import get_gpu_memory_gb, get_global_gpu_config, get_effective_free_vram_gb
@@ -581,6 +582,11 @@ class AceStepHandler(
             self.offload_dit_to_cpu = offload_dit_to_cpu
             
             is_rocm_cuda = is_rocm_cuda_device(device)
+            use_rocm_direct_load = should_rocm_direct_model_load(
+                is_rocm_cuda=is_rocm_cuda,
+                offload_to_cpu=offload_to_cpu,
+                offload_dit_to_cpu=offload_dit_to_cpu,
+            )
 
             # MPS safety: torch.compile and torchao quantization are not supported on MPS
             if device == "mps":
@@ -680,11 +686,22 @@ class AceStepHandler(
                 for candidate in attn_candidates:
                     try:
                         logger.info(f"[initialize_service] Attempting to load model with attention implementation: {candidate}")
+                        model_load_kwargs = {
+                            "trust_remote_code": True,
+                            "attn_implementation": candidate,
+                            "torch_dtype": self.dtype,
+                        }
+                        if use_rocm_direct_load:
+                            model_load_kwargs["low_cpu_mem_usage"] = True
+                            model_load_kwargs["device_map"] = {"": device}
+                            logger.info(
+                                "[initialize_service] ROCm direct model load enabled "
+                                "(device_map + low_cpu_mem_usage)."
+                            )
+
                         self.model = AutoModel.from_pretrained(
                             acestep_v15_checkpoint_path,
-                            trust_remote_code=True,
-                            attn_implementation=candidate,
-                            torch_dtype=self.dtype,
+                            **model_load_kwargs,
                         )
                         attn_implementation = candidate
                         break
@@ -700,15 +717,15 @@ class AceStepHandler(
                 self.model.config._attn_implementation = attn_implementation
                 self.config = self.model.config
                 # Move model to device and set dtype
-                if not self.offload_to_cpu:
+                if use_rocm_direct_load:
+                    logger.info("[initialize_service] Skipping explicit DiT transfer after ROCm direct load.")
+                elif not self.offload_to_cpu:
+                    self._recursive_to_device(self.model, device, self.dtype)
+                elif not self.offload_dit_to_cpu:
+                    logger.info(f"[initialize_service] Keeping main model on {device} (persistent)")
                     self._recursive_to_device(self.model, device, self.dtype)
                 else:
-                    # If offload_to_cpu is True, check if we should keep DiT on GPU
-                    if not self.offload_dit_to_cpu:
-                        logger.info(f"[initialize_service] Keeping main model on {device} (persistent)")
-                        self._recursive_to_device(self.model, device, self.dtype)
-                    else:
-                        self._recursive_to_device(self.model, "cpu", self.dtype)
+                    self._recursive_to_device(self.model, "cpu", self.dtype)
                 self.model.eval()
                 
                 if compile_model:

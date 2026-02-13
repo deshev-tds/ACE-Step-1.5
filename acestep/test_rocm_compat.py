@@ -9,6 +9,7 @@ from acestep.core.generation.handler.rocm_compat import (
     build_attention_candidates,
     choose_service_dtype,
     is_rocm_cuda_device,
+    should_rocm_direct_model_load,
 )
 
 
@@ -90,6 +91,37 @@ class TestRocmCompat(unittest.TestCase):
         )
         self.assertEqual(rocm_result, ["flash_attention_2", "eager", "sdpa"])
         self.assertEqual(cuda_result, ["flash_attention_2", "sdpa", "eager"])
+
+    def test_should_rocm_direct_model_load(self):
+        """Direct load should be enabled only for ROCm + resident DiT setups."""
+        self.assertTrue(
+            should_rocm_direct_model_load(
+                is_rocm_cuda=True,
+                offload_to_cpu=False,
+                offload_dit_to_cpu=False,
+            )
+        )
+        self.assertTrue(
+            should_rocm_direct_model_load(
+                is_rocm_cuda=True,
+                offload_to_cpu=True,
+                offload_dit_to_cpu=False,
+            )
+        )
+        self.assertFalse(
+            should_rocm_direct_model_load(
+                is_rocm_cuda=True,
+                offload_to_cpu=True,
+                offload_dit_to_cpu=True,
+            )
+        )
+        self.assertFalse(
+            should_rocm_direct_model_load(
+                is_rocm_cuda=False,
+                offload_to_cpu=False,
+                offload_dit_to_cpu=False,
+            )
+        )
 
 
 if __name__ == "__main__":

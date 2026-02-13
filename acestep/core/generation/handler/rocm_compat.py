@@ -77,3 +77,26 @@ def build_attention_candidates(
                 candidates.append(impl)
 
     return candidates
+
+
+def should_rocm_direct_model_load(
+    is_rocm_cuda: bool,
+    offload_to_cpu: bool,
+    offload_dit_to_cpu: bool,
+) -> bool:
+    """Return ``True`` if DiT should be loaded directly onto ROCm device.
+
+    Args:
+        is_rocm_cuda: Whether runtime is CUDA-on-ROCm.
+        offload_to_cpu: Global CPU offload flag.
+        offload_dit_to_cpu: DiT-specific CPU offload flag.
+
+    Returns:
+        ``True`` when ROCm is active and DiT is intended to stay resident on
+        GPU after initialization.
+    """
+    if not is_rocm_cuda:
+        return False
+    if not offload_to_cpu:
+        return True
+    return not offload_dit_to_cpu
